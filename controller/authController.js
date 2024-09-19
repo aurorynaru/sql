@@ -1,70 +1,84 @@
-require('dotenv').config({ path: `${process.cwd()}/.env` })
-const user = require('../db/models/user')
-const jwt = require('jsonwebtoken')
-const bcrypt = require('bcrypt')
 const catchAsync = require('../utils/catchAsync')
+const user = require('../models/user')
+const bcrypt = require('bcrypt')
+const generateToken = require('../utils/generateToken')
+
+const s3 = require('../utils/s3Client')
 const AppError = require('../utils/appError')
 
-const generateToken = (payload) => {
-    return jwt.sign(payload, process.env.JWT_TOKEN, {
-        expiresIn: process.env.JWT_EXPIRES_IN
-    })
-}
-
 const signUp = catchAsync(async (req, res, next) => {
-    const { firstName, lastName, email, password, confirmPassword, userType } =
-        req.body
+    const profilePicture = req.file.path.split(`\\`)[2]
+    const { email, userName, password, confirmPassword } = req.body
 
-    if (!['1', '2'].includes(userType)) {
-        throw new AppError('no', 400)
-        // return res.status(400).json({ error: 'no' })
+    let bio = req.body.bio
+
+    if (bio === undefined) {
+        bio = 'yo'
     }
 
     const newUser = await user.create({
-        firstName,
-        lastName,
         email,
+        userName,
         password,
         confirmPassword,
-        userType
+        bio,
+        profilePicture
     })
+
     if (!newUser) {
         return next(new AppError('fail', 400))
-        // return res.status(400).json({ error: 'fail' })
     }
 
     const result = newUser.toJSON()
 
     delete result.password
     delete result.deletedAt
+
     result.token = generateToken({
         id: result.id
     })
 
-    return res.status(201).json({
+    req.body.user = {
+        result
+    }
+
+    next()
+})
+
+const logIn = catchAsync(async (req, res, next) => {
+    const { password, userName, email } = req.body
+    console.log(req.body)
+    let query = {}
+
+    if (!password || (!userName && !email)) {
+        return res.status(400).json({ message: 'missing' })
+    }
+
+    if (userName) {
+        query.userName = userName
+    } else {
+        query.email = email
+    }
+
+    const result = await user.findOne({ where: query })
+
+    if (!result || !(await bcrypt.compare(password, result.password))) {
+        return next(new AppError('not found', 401))
+    }
+
+    const newRes = result.toJSON()
+    const token = generateToken({ id: result.id })
+
+    const getAvatarUrl = (profilePicture) => {
+        const bucketName = process.env.BUCKET_NAME_MODEL_IMG
+        return `https://${bucketName}.s3.ap-southeast-1.amazonaws.com/avatar/${profilePicture}`
+    }
+
+    return res.status(200).json({
         message: 'yes',
-        data: result
+        token,
+        imgUrl: getAvatarUrl(result.profilePicture)
     })
 })
 
-const login = catchAsync(async (req, res, next) => {
-    const { email, password } = req.body
-
-    if (!email || !password) {
-        return next(new AppError('missing', 400))
-        // return res.status(400).json({ error: 'missing' })
-    }
-
-    const result = await user.findOne({ where: { email } })
-
-    if (!result || !(await bcrypt.compare(password, result.password))) {
-        return next(new AppError('not', 401))
-        // return res.status(401).json({ error: 'not' })
-    }
-
-    const token = generateToken({ id: result.id })
-
-    return res.status(401).json({ message: 'yes', token })
-})
-
-module.exports = { signUp, login }
+module.exports = { signUp, logIn }
